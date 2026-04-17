@@ -5,8 +5,8 @@
 // @description  Adds import/export buttons to the Wheel of Fortune modal on chaster.app. Allows you to back up a current config to a .JSON file, and import any .JSON configs.
 // @author       earlekastle
 // @match        https://chaster.app/*
-// @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/master/script.user.js
-// @downloadURL  https://github.com/earlekastle/chaster-wof-config/raw/master/script.user.js
+// @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
+// @downloadURL  https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
 // @grant        none
 // @icon         https://chaster.app/favicon.png
 // ==/UserScript==
