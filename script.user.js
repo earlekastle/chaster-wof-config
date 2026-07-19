@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Chaster Wheel of Fortune Config Import/Export + Custom Colors
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      3.0
 // @description  Adds import/export buttons, per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
-// @author       earlekastle (color support added on top locally)
+// @author       earlekastle
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
 // @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
@@ -263,6 +263,57 @@
 		setTimeout(() => setStatus(statusEl, ""), 3000);
 	}
 
+	// Pushes one segment's data into a row that already exists at this index
+	// (type, then text or duration, then color). Shared by the full rebuild
+	// (applySegments, used for Import) and the in-place reorder below, which
+	// only touches the rows actually affected by a move.
+	async function applySegmentToExistingRow(modal, index, seg) {
+		const typeSelect = modal.querySelector(`select[name="segments[${index}].type"]`);
+		if (!typeSelect) return;
+		setNativeSelectValue(typeSelect, seg.type);
+		await sleep(150); // let React re-render extras
+
+		if (seg.type === "text") {
+			const textInput = modal.querySelector(`input[name="segments[${index}].text"]`);
+			if (textInput) {
+				setNativeInputValue(textInput, seg.text ?? "");
+				await sleep(50);
+			}
+		} else if (DURATION_TYPES.has(seg.type) && seg.duration) {
+			// Click the pencil to open the popover
+			const row = typeSelect.closest(".card-content");
+			const pencilLink = row?.querySelector(".dotted-link");
+			if (!pencilLink) return;
+
+			pencilLink.click();
+			const popover = await waitForDurationPopover();
+			if (!popover) return;
+
+			const spinners = popover.querySelectorAll(".DurationSelectorItem");
+			await resetDurationSpinners(spinners);
+			await applyDurationToItems(spinners, seg.duration);
+
+			// Close the popover by clicking outside it
+			await closeDurationPopover();
+		}
+		// freeze/set-freeze/set-unfreeze: nothing more to do
+
+		// Colors: only set if this segment's JSON explicitly carries one.
+		// Segments with no "color" key are left however they currently are,
+		// importing an old export (or one without colors set) never wipes
+		// out colors you've already picked for matching segments.
+		if (seg.color) {
+			const identity = segmentIdentity(seg);
+			const colors = loadColors();
+			colors[identity] = seg.color;
+			saveColors(colors);
+
+			const row = modal.querySelector(`select[name="segments[${index}].type"]`)?.closest(".card-content");
+			const picker = row?.querySelector(".wof-color-picker");
+			if (picker) picker.value = seg.color;
+		}
+	}
+
 	async function applySegments(modal, segments, statusEl) {
 		setStatus(statusEl, "\ud83d\uddd1 Clearing existing segments\u2026");
 		await clearAllSegments(modal);
@@ -284,69 +335,44 @@
 				continue;
 			}
 
-			// Set type
-			const typeSelect = modal.querySelector(`select[name="segments[${i}].type"]`);
-			if (!typeSelect) continue;
-			setNativeSelectValue(typeSelect, seg.type);
-			await sleep(150); // let React re-render extras
-
-			if (seg.type === "text") {
-				const textInput = modal.querySelector(`input[name="segments[${i}].text"]`);
-				if (textInput) {
-					setNativeInputValue(textInput, seg.text ?? "");
-					await sleep(50);
-				}
-			} else if (DURATION_TYPES.has(seg.type) && seg.duration) {
-				// Click the pencil to open the popover
-				const row = typeSelect.closest(".card-content");
-				const pencilLink = row?.querySelector(".dotted-link");
-				if (!pencilLink) continue;
-
-				pencilLink.click();
-				const popover = await waitForDurationPopover();
-				if (!popover) continue;
-
-				const spinners = popover.querySelectorAll(".DurationSelectorItem");
-				await resetDurationSpinners(spinners);
-				await applyDurationToItems(spinners, seg.duration);
-
-				// Close the popover by clicking outside it
-				await closeDurationPopover();
-			}
-			// freeze/set-freeze/set-unfreeze: nothing more to do
-
-			// Colors: only set if this segment's JSON explicitly carries one.
-			// Segments with no "color" key are left however they currently are,
-			// importing an old export (or one without colors set) never wipes
-			// out colors you've already picked for matching segments.
-			if (seg.color) {
-				const identity = segmentIdentity(seg);
-				const colors = loadColors();
-				colors[identity] = seg.color;
-				saveColors(colors);
-
-				const row = modal.querySelector(`select[name="segments[${i}].type"]`)?.closest(".card-content");
-				const picker = row?.querySelector(".wof-color-picker");
-				if (picker) picker.value = seg.color;
-			}
+			await applySegmentToExistingRow(modal, i, seg);
 		}
 	}
 
-	// Drag-and-drop reordering rebuilds the whole segment list the same way
-	// Import JSON does (clear, then re-add each row in order), rather than
-	// trying to move DOM nodes around by hand. That gets us type, text,
-	// duration, and color all carried over for free, since applySegments
-	// already knows how to restore all of that, we just need to hand it the
-	// segments in the order we want.
-	async function reorderSegments(modal, sourceIndex, destIndex) {
-		if (sourceIndex === destIndex || Number.isNaN(sourceIndex) || Number.isNaN(destIndex)) return;
+	// Drag-and-drop reordering. Unlike Import (which has to build the whole
+	// list from nothing), every row here already exists, so this only
+	// pushes new values into the rows actually affected by the move,
+	// between the drag source and drop destination, rather than clearing
+	// and re-adding the entire list. Rows outside that range keep whatever
+	// they already have.
+	//
+	// destIndexOriginal is expressed in the array's ORIGINAL (pre-removal)
+	// numbering, e.g. "drop after the row currently at index 2" is
+	// destIndexOriginal = 3. Removing the dragged item shifts every later
+	// index down by one, so that gets corrected for below before splicing
+	// it back in.
+	async function reorderSegments(modal, sourceIndex, destIndexOriginal) {
+		if (Number.isNaN(sourceIndex) || Number.isNaN(destIndexOriginal)) return;
 		const statusEl = modal.querySelector(".wof-status");
 		const config = readModalState(modal);
 		const segments = config.segments;
-		if (sourceIndex < 0 || sourceIndex >= segments.length || destIndex < 0 || destIndex >= segments.length) return;
+		if (sourceIndex < 0 || sourceIndex >= segments.length) return;
+
+		const adjustedDest = destIndexOriginal > sourceIndex ? destIndexOriginal - 1 : destIndexOriginal;
+		const destIndex = Math.max(0, Math.min(segments.length - 1, adjustedDest));
+		if (destIndex === sourceIndex) return;
+
 		const [moved] = segments.splice(sourceIndex, 1);
 		segments.splice(destIndex, 0, moved);
-		await applySegments(modal, segments, statusEl);
+
+		const start = Math.min(sourceIndex, destIndex);
+		const end = Math.max(sourceIndex, destIndex);
+		setStatus(statusEl, "\u2195\ufe0f Reordering\u2026");
+		for (let i = start; i <= end; i++) {
+			await applySegmentToExistingRow(modal, i, segments[i]);
+		}
+		setStatus(statusEl, "\u2705 Done!");
+		setTimeout(() => setStatus(statusEl, ""), 2000);
 	}
 
 	async function clearAllSegments(modal) {
@@ -529,8 +555,14 @@
 			.wof-dragging {
 				opacity: 0.4;
 			}
-			.wof-drop-target {
-				border-top: 2px solid #6d7dd1;
+			.wof-drop-indicator {
+				position: fixed;
+				height: 4px;
+				background: #6d7dd1;
+				border-radius: 2px;
+				pointer-events: none;
+				z-index: 10000;
+				display: none;
 			}
 		`;
 		document.head.appendChild(style);
@@ -623,6 +655,34 @@
 	// Drag-and-drop reordering. The row's own index is kept fresh on every
 	// call (rows get added/removed, so positions shift), but the actual
 	// drag/drop event listeners are only wired once per row.
+	let wheelReorderIndicator = null;
+
+	function getWheelReorderIndicator() {
+		if (wheelReorderIndicator && document.body.contains(wheelReorderIndicator)) {
+			return wheelReorderIndicator;
+		}
+		wheelReorderIndicator = document.createElement("div");
+		wheelReorderIndicator.className = "wof-drop-indicator";
+		// Appended to body, not to Chaster's row list, on purpose: this
+		// element never becomes a sibling of the rows React manages, so
+		// there's nothing for its reconciliation to trip over.
+		document.body.appendChild(wheelReorderIndicator);
+		return wheelReorderIndicator;
+	}
+
+	function showWheelReorderIndicator(row, before) {
+		const indicator = getWheelReorderIndicator();
+		const rect = row.getBoundingClientRect();
+		indicator.style.left = rect.left + "px";
+		indicator.style.width = rect.width + "px";
+		indicator.style.top = (before ? rect.top - 2 : rect.bottom - 2) + "px";
+		indicator.style.display = "block";
+	}
+
+	function hideWheelReorderIndicator() {
+		if (wheelReorderIndicator) wheelReorderIndicator.style.display = "none";
+	}
+
 	function injectDragHandles(modal) {
 		const rows = modal.querySelectorAll(".card-content");
 		rows.forEach((row, i) => {
@@ -648,25 +708,29 @@
 
 			row.addEventListener("dragend", () => {
 				row.classList.remove("wof-dragging");
-				modal.querySelectorAll(".wof-drop-target").forEach((el) => el.classList.remove("wof-drop-target"));
+				hideWheelReorderIndicator();
 			});
 
 			row.addEventListener("dragover", (e) => {
 				e.preventDefault();
 				e.dataTransfer.dropEffect = "move";
-				row.classList.add("wof-drop-target");
-			});
-
-			row.addEventListener("dragleave", () => {
-				row.classList.remove("wof-drop-target");
+				const rect = row.getBoundingClientRect();
+				const before = e.clientY < rect.top + rect.height / 2;
+				row.dataset.wofDropBefore = before ? "1" : "0";
+				showWheelReorderIndicator(row, before);
 			});
 
 			row.addEventListener("drop", (e) => {
 				e.preventDefault();
-				row.classList.remove("wof-drop-target");
+				hideWheelReorderIndicator();
 				const sourceIndex = parseInt(e.dataTransfer.getData("text/plain"), 10);
-				const destIndex = parseInt(row.dataset.wofRowIndex, 10);
-				reorderSegments(modal, sourceIndex, destIndex);
+				const rowIndex = parseInt(row.dataset.wofRowIndex, 10);
+				const before = row.dataset.wofDropBefore === "1";
+				// Expressed in the row list's original (pre-removal)
+				// numbering, reorderSegments corrects for the shift caused
+				// by removing the dragged item itself.
+				const destIndexOriginal = before ? rowIndex : rowIndex + 1;
+				reorderSegments(modal, sourceIndex, destIndexOriginal);
 			});
 		});
 	}
