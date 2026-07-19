@@ -1,17 +1,21 @@
 // ==UserScript==
 // @name         Chaster Wheel of Fortune Config Import/Export + Custom Colors
 // @namespace    http://tampermonkey.net/
-// @version      2.8
-// @description  Adds import/export buttons and per-slice color pickers to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
-// @author       earlekastle
+// @version      2.9
+// @description  Adds import/export buttons, per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
+// @author       earlekastle (color support added on top locally)
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
-// @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
-// @downloadURL  https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
 // @run-at       document-start
 // @grant        none
 // @icon         https://chaster.app/favicon.png
 // ==/UserScript==
+
+// This is a local fork of earlekastle's chaster-wof-config script with slice
+// color support merged in. The original @updateURL/@downloadURL have been
+// removed on purpose: an auto-update from the upstream repo would silently
+// overwrite everything below and drop the color feature. If you want to
+// pick up future upstream changes, check the repo manually and re-merge.
 
 (function () {
 	"use strict";
@@ -332,6 +336,23 @@
 		}
 	}
 
+	// Drag-and-drop reordering rebuilds the whole segment list the same way
+	// Import JSON does (clear, then re-add each row in order), rather than
+	// trying to move DOM nodes around by hand. That gets us type, text,
+	// duration, and color all carried over for free, since applySegments
+	// already knows how to restore all of that, we just need to hand it the
+	// segments in the order we want.
+	async function reorderSegments(modal, sourceIndex, destIndex) {
+		if (sourceIndex === destIndex || Number.isNaN(sourceIndex) || Number.isNaN(destIndex)) return;
+		const statusEl = modal.querySelector(".wof-status");
+		const config = readModalState(modal);
+		const segments = config.segments;
+		if (sourceIndex < 0 || sourceIndex >= segments.length || destIndex < 0 || destIndex >= segments.length) return;
+		const [moved] = segments.splice(sourceIndex, 1);
+		segments.splice(destIndex, 0, moved);
+		await applySegments(modal, segments, statusEl);
+	}
+
 	async function clearAllSegments(modal) {
 		let safety = 300;
 		while (safety-- > 0) {
@@ -411,6 +432,7 @@
 		`;
 
 		const statusEl = document.createElement("span");
+		statusEl.className = "wof-status";
 		statusEl.style.cssText = "font-size: 16px; order: 99;";
 
 		const exportBtn = makeButton("Export JSON", "#171A1C", "Download current config (including colors) as a JSON file");
@@ -497,6 +519,23 @@
 			.wof-color-reset:hover {
 				opacity: 1;
 			}
+			.wof-drag-handle {
+				cursor: grab;
+				padding: 0 8px;
+				opacity: 0.5;
+				user-select: none;
+				font-size: 14px;
+				line-height: 1;
+			}
+			.wof-drag-handle:hover {
+				opacity: 1;
+			}
+			.wof-dragging {
+				opacity: 0.4;
+			}
+			.wof-drop-target {
+				border-top: 2px solid #6d7dd1;
+			}
 		`;
 		document.head.appendChild(style);
 	}
@@ -582,6 +621,57 @@
 			// The click handler runs before Formik/React finish re-rendering
 			// the shuffled values, give it a beat before re-reading rows.
 			setTimeout(() => injectColorPickers(modal), 50);
+		});
+	}
+
+	// Drag-and-drop reordering. The row's own index is kept fresh on every
+	// call (rows get added/removed, so positions shift), but the actual
+	// drag/drop event listeners are only wired once per row.
+	function injectDragHandles(modal) {
+		const rows = modal.querySelectorAll(".card-content");
+		rows.forEach((row, i) => {
+			row.dataset.wofRowIndex = String(i);
+
+			if (!row.querySelector(".wof-drag-handle")) {
+				const handle = document.createElement("span");
+				handle.className = "wof-drag-handle";
+				handle.textContent = "\u22ee\u22ee";
+				handle.title = "Drag to reorder";
+				row.insertBefore(handle, row.firstChild);
+			}
+
+			if (row.dataset.wofDragWired) return;
+			row.dataset.wofDragWired = "1";
+			row.draggable = true;
+
+			row.addEventListener("dragstart", (e) => {
+				e.dataTransfer.effectAllowed = "move";
+				e.dataTransfer.setData("text/plain", row.dataset.wofRowIndex);
+				row.classList.add("wof-dragging");
+			});
+
+			row.addEventListener("dragend", () => {
+				row.classList.remove("wof-dragging");
+				modal.querySelectorAll(".wof-drop-target").forEach((el) => el.classList.remove("wof-drop-target"));
+			});
+
+			row.addEventListener("dragover", (e) => {
+				e.preventDefault();
+				e.dataTransfer.dropEffect = "move";
+				row.classList.add("wof-drop-target");
+			});
+
+			row.addEventListener("dragleave", () => {
+				row.classList.remove("wof-drop-target");
+			});
+
+			row.addEventListener("drop", (e) => {
+				e.preventDefault();
+				row.classList.remove("wof-drop-target");
+				const sourceIndex = parseInt(e.dataTransfer.getData("text/plain"), 10);
+				const destIndex = parseInt(row.dataset.wofRowIndex, 10);
+				reorderSegments(modal, sourceIndex, destIndex);
+			});
 		});
 	}
 
@@ -1019,6 +1109,7 @@
 			}
 			injectColorPickers(modal);
 			hookShuffleButton(modal);
+			injectDragHandles(modal);
 		});
 	}
 
