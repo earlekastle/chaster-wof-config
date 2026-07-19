@@ -6,16 +6,12 @@
 // @author       earlekastle (color support added on top locally)
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
+// @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
+// @downloadURL  https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
 // @run-at       document-start
 // @grant        none
 // @icon         https://chaster.app/favicon.png
 // ==/UserScript==
-
-// This is a local fork of earlekastle's chaster-wof-config script with slice
-// color support merged in. The original @updateURL/@downloadURL have been
-// removed on purpose: an auto-update from the upstream repo would silently
-// overwrite everything below and drop the color feature. If you want to
-// pick up future upstream changes, check the repo manually and re-merge.
 
 (function () {
 	"use strict";
