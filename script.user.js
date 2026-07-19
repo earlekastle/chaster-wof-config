@@ -3,19 +3,15 @@
 // @namespace    http://tampermonkey.net/
 // @version      2.8
 // @description  Adds import/export buttons and per-slice color pickers to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
-// @author       earlekastle (color support added on top locally)
+// @author       earlekastle
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
+// @updateURL    https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
+// @downloadURL  https://github.com/earlekastle/chaster-wof-config/raw/refs/heads/main/script.user.js
 // @run-at       document-start
 // @grant        none
 // @icon         https://chaster.app/favicon.png
 // ==/UserScript==
-
-// This is a local fork of earlekastle's chaster-wof-config script with slice
-// color support merged in. The original @updateURL/@downloadURL have been
-// removed on purpose: an auto-update from the upstream repo would silently
-// overwrite everything below and drop the color feature. If you want to
-// pick up future upstream changes, check the repo manually and re-merge.
 
 (function () {
 	"use strict";
