@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
-// @version      3.2
+// @version      3.3
 // @description  Adds import/export buttons (weights included), per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
 // @author       earlekastle
 // @icon         https://chaster.app/favicon.png
@@ -471,6 +471,51 @@
 			.wof-color-picker-wrap.wof-push-right {
 				margin-left: auto;
 			}
+			/* Weight label: the word becomes Font Awesome 5 Pro's
+			   balance-scale-left (FA6 calls it scale-unbalanced), which
+			   Chaster already loads. font-size 0 hides the text but keeps
+			   it for screen readers. Rules here that overlap Chaster's
+			   own need !important, because Emotion injects its styles
+			   after this sheet at equal specificity. */
+			[data-wof-weight-row] > label {
+				font-size: 0 !important;
+			}
+			[data-wof-weight-row] > label::before {
+				content: "\\f515"; /* double backslash: this CSS sits in a JS template literal */
+				font-family: "Font Awesome 5 Pro";
+				font-weight: 400;
+				font-size: 16px;
+				opacity: 0.7;
+			}
+			/* One line per row. Chaster's content box wraps, and puts the
+			   weight control on its own line below 600px on purpose, so
+			   this only applies above that. Instead of wrapping, the text
+			   field (or the duration link / freeze description) shrinks. */
+			@media (min-width: 600px) {
+				[data-wof-row-content] {
+					flex-wrap: nowrap !important;
+					column-gap: 8px !important;
+				}
+				[data-wof-row-content] > * {
+					min-width: 0 !important;
+				}
+				[data-wof-row-content] > :first-child,
+				[data-wof-row-content] > [data-wof-weight-control] {
+					flex-shrink: 0 !important;
+				}
+				[data-wof-row-content] > [data-wof-text-field] {
+					flex: 1 1 auto !important;
+				}
+				[data-wof-text-field] * {
+					min-width: 0 !important;
+				}
+				[data-wof-text-field] input {
+					width: 100% !important;
+				}
+				[data-wof-weight-row] {
+					gap: 6px !important;
+				}
+			}
 			.wof-color-picker {
 				width: 24px;
 				height: 24px;
@@ -637,6 +682,22 @@
 
 		const home = weightRow && weightRow.contains(weightInput) ? weightRow : content;
 		wrap.classList.toggle("wof-push-right", home === content);
+
+		// Hooks for the one-line layout CSS in injectPickerStyles. Data
+		// attributes rather than classes, because React overwrites
+		// className on re-render but leaves attributes it didn't set alone.
+		content.dataset.wofRowContent = "1";
+		if (weightControl) weightControl.dataset.wofWeightControl = "1";
+		if (home === weightRow) {
+			weightRow.dataset.wofWeightRow = "1";
+			const label = weightRow.querySelector(":scope > label");
+			if (label && !label.title) label.title = label.textContent;
+		}
+		// The free-text field. The select's own hidden input has no
+		// placeholder, so this only matches the Text action's input.
+		const textInput = content.querySelector("input[placeholder]");
+		const textField = textInput && [...content.children].find((c) => c.contains(textInput));
+		if (textField) textField.dataset.wofTextField = "1";
 		if (wrap.parentElement !== home || home.lastElementChild !== wrap) {
 			home.appendChild(wrap);
 		}
