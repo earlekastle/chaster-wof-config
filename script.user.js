@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
-// @version      3.1
+// @version      3.2
 // @description  Adds import/export buttons (weights included), per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
 // @author       earlekastle
 // @icon         https://chaster.app/favicon.png
@@ -465,22 +465,37 @@
 			.wof-color-picker-wrap {
 				display: inline-flex;
 				align-items: center;
-				gap: 4px;
-				margin-right: 8px;
+				gap: 2px;
+				flex-shrink: 0;
+			}
+			.wof-color-picker-wrap.wof-push-right {
+				margin-left: auto;
 			}
 			.wof-color-picker {
-				width: 28px;
-				height: 28px;
+				width: 24px;
+				height: 24px;
 				padding: 0;
 				border: none;
 				border-radius: 50%;
 				cursor: pointer;
 				background: none;
 			}
+			.wof-color-picker::-webkit-color-swatch-wrapper {
+				padding: 0;
+			}
+			.wof-color-picker::-webkit-color-swatch {
+				border: none;
+				border-radius: 50%;
+			}
+			.wof-color-picker::-moz-color-swatch {
+				border: none;
+				border-radius: 50%;
+			}
 			.wof-color-reset {
 				cursor: pointer;
-				opacity: 0.6;
-				font-size: 12px;
+				opacity: 0.4;
+				font-size: 11px;
+				padding: 0 2px;
 				background: none;
 				border: none;
 				color: inherit;
@@ -540,13 +555,11 @@
 				if (picker && document.activeElement !== picker) {
 					picker.value = swatchColor;
 				}
+				placeColorPicker(row, existingWrap);
 				return;
 			}
 
-			// The delete button is the row's last child. Matched by position
-			// rather than aria-label, which is translated.
-			const anchor = row.lastElementChild;
-			if (!anchor || anchor.tagName !== "BUTTON") return;
+			if (!getRowContent(row)) return;
 
 			const wrap = document.createElement("div");
 			wrap.className = "wof-color-picker-wrap";
@@ -591,8 +604,42 @@
 
 			wrap.appendChild(picker);
 			wrap.appendChild(reset);
-			row.insertBefore(wrap, anchor);
+			placeColorPicker(row, wrap);
 		});
+	}
+
+	// The flex box holding the row's type select, text/duration field, and
+	// (when weights are on) the weight control. Found as the row's direct
+	// child containing the type combobox, not by its generated class.
+	function getRowContent(row) {
+		return [...row.children].find((c) => c.querySelector('[role="combobox"]')) || null;
+	}
+
+	// Where the picker lives depends on whether weights are on. Sitting
+	// outside the content box as its own flex item squeezes the content
+	// enough to wrap the weight control onto a second line, so it goes
+	// inside instead:
+	// - weights on: appended to the weight control's own inline row, right
+	//   after the percentage, so it moves and wraps together with it
+	// - weights off: last item in the content box, pushed to the right
+	// React adds and removes the weight control when weights are toggled
+	// (taking the picker with it on removal), and the observer calls this
+	// again each time, so the picker ends up back in the right place. Every
+	// branch checks before moving so the mutation it causes is a no-op on
+	// the next pass.
+	function placeColorPicker(row, wrap) {
+		const content = getRowContent(row);
+		if (!content) return;
+
+		const weightInput = content.querySelector('input[type="number"]');
+		const weightControl = weightInput && [...content.children].find((c) => c.contains(weightInput));
+		const weightRow = weightControl?.firstElementChild;
+
+		const home = weightRow && weightRow.contains(weightInput) ? weightRow : content;
+		wrap.classList.toggle("wof-push-right", home === content);
+		if (wrap.parentElement !== home || home.lastElementChild !== wrap) {
+			home.appendChild(wrap);
+		}
 	}
 
 	// Drag-and-drop reordering. Indexes are looked up live at drag/drop
