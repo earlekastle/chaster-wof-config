@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
-// @version      3.4
+// @version      3.5
 // @description  Adds import/export buttons (weights included), per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
 // @author       earlekastle
 // @icon         https://chaster.app/favicon.png
@@ -1116,21 +1116,17 @@
 	 * *height* (the font size) is what determines whether it stays inside
 	 * its own wedge or bleeds tangentially into the slice next door.
 	 * Chaster's own drawText shrinks font size against a flat 36% of canvas
-	 * width, treating that as a length budget, it never separately checks
-	 * whether the resulting font height fits the wedge's actual tangential
-	 * width, which on a wheel with a lot of segments is much narrower than
-	 * the label's own reach toward the hub. That's what crops labels into
-	 * neighboring slices. It also anchors the baseline with a fixed y
-	 * offset instead of a true vertical center.
+	 * width and never checks the font height against the wedge's actual
+	 * width, which crops labels into neighboring slices on busy wheels.
 	 *
-	 * The fix picks a font size from the wedge's true width at a reference
-	 * radius close to the hub (the tightest point any label passes through
-	 * on its way toward center, since every wedge narrows to a point at
-	 * r=0), then lets the text run radially within a fixed budget, shrinking
-	 * further and finally truncating with an ellipsis if a label is still
-	 * too long at the smallest legible size. It does not wrap onto extra
-	 * lines: stacking wrapped lines sideways is a tangential offset, the
-	 * same mistake that caused the bleed in the first place.
+	 * Every label here is right-aligned against the rim, where a wedge is
+	 * widest, so all labels line up along the outer edge. The font is sized
+	 * against the wedge's width at the label's inner end, the narrowest
+	 * point it covers, so a shorter label (or smaller font) also gets more
+	 * room by sitting further out. A label still too long at the smallest
+	 * legible size is truncated with an ellipsis rather than wrapped:
+	 * stacking wrapped lines sideways is a tangential offset, the same
+	 * mistake that caused the bleed in the first place.
 	 *
 	 * With weights, each wedge has its own angle, so the angle comes from
 	 * the slice that was just filled rather than 360 / segment count.
@@ -1138,18 +1134,14 @@
 
 	const WHEEL_TEXT_MIN_FONT_PX = 7;
 	const WHEEL_TEXT_MAX_FONT_PX = 20;
-	// Reference radius (fraction of canvas width) used only to work out the
-	// tangential ceiling on font size. Every wedge keeps narrowing all the
-	// way to the hub, so treating this close-in point as the worst case
-	// keeps text from ever bleeding into a neighboring wedge, regardless of
-	// how far outward the label's own radial reach goes.
+	// Innermost point (fraction of canvas width) a label may reach toward
+	// the hub, keeps long labels from piling up in the center.
 	const WHEEL_TEXT_INNER_BOUND_FRACTION = 0.14;
-	// Outer edge of the radial run labels are allowed, leaves margin
-	// before the rim.
+	// Where labels are right-aligned, leaves margin before the rim.
 	const WHEEL_TEXT_OUTER_BOUND_FRACTION = 0.46;
-	// Fraction of the true tangential width at the reference radius that
-	// font size is allowed to use. Below 1 on purpose, leaves a visible gap
-	// between neighboring labels instead of them touching edge to edge.
+	// Fraction of the wedge's true width that font size is allowed to use.
+	// Below 1 on purpose, leaves a visible gap between neighboring labels
+	// instead of them touching edge to edge.
 	const WHEEL_TEXT_GAP_PADDING = 0.85;
 	const WHEEL_TEXT_FONT_FAMILY = "Nunito";
 
@@ -1157,42 +1149,9 @@
 		// Past a half circle the chord starts shrinking again, but the
 		// label only needs the width of a half circle at most.
 		const angle = Math.min(sliceAngle, Math.PI);
-		const innerBoundRadius = WHEEL_TEXT_INNER_BOUND_FRACTION * canvasWidth;
-		const chordAtInnerBound = 2 * innerBoundRadius * Math.sin(angle / 2);
-		const geometryFontPx = Math.floor(chordAtInnerBound * WHEEL_TEXT_GAP_PADDING);
-		const maxFontPx = Math.min(WHEEL_TEXT_MAX_FONT_PX, Math.max(WHEEL_TEXT_MIN_FONT_PX, geometryFontPx));
-		const radialBudget = (WHEEL_TEXT_OUTER_BOUND_FRACTION - WHEEL_TEXT_INNER_BOUND_FRACTION) * canvasWidth;
-
-		for (let size = maxFontPx; size >= WHEEL_TEXT_MIN_FONT_PX; size--) {
-			ctx.font = `normal ${size}px ${WHEEL_TEXT_FONT_FAMILY}`;
-			if (ctx.measureText(text).width <= radialBudget) {
-				return { fontSize: size, text };
-			}
-		}
-
-		// Doesn't fit even at the smallest legible size, a long label on a
-		// heavily segmented wheel. Truncate with an ellipsis rather than
-		// wrap it into a second line stacked at a different radius, which
-		// would read strangely (see the comment block above this function).
-		ctx.font = `normal ${WHEEL_TEXT_MIN_FONT_PX}px ${WHEEL_TEXT_FONT_FAMILY}`;
-		let truncated = text;
-		while (truncated.length > 1 && ctx.measureText(truncated + "…").width > radialBudget) {
-			truncated = truncated.slice(0, -1);
-		}
-		return { fontSize: WHEEL_TEXT_MIN_FONT_PX, text: truncated.length < text.length ? truncated + "…" : truncated };
-	}
-
-	/*
-	 * Narrow slices (the ones Chaster leaves blank) get their label pushed
-	 * out against the rim, where the wedge is widest, and right-aligned
-	 * there. The font is sized against the wedge's width at the label's
-	 * inner end, the narrowest point it covers, so a smaller font also
-	 * lets the label sit further out where there's more room.
-	 */
-	function fitNarrowSliceText(ctx, text, canvasWidth, sliceAngle) {
 		const outerRadius = WHEEL_TEXT_OUTER_BOUND_FRACTION * canvasWidth;
 		const innerLimit = WHEEL_TEXT_INNER_BOUND_FRACTION * canvasWidth;
-		const chordFactor = 2 * Math.sin(sliceAngle / 2) * WHEEL_TEXT_GAP_PADDING;
+		const chordFactor = 2 * Math.sin(angle / 2) * WHEEL_TEXT_GAP_PADDING;
 		// Longest label (in px) that still has room for a font of `size`.
 		const maxWidthFor = (size) => Math.min(outerRadius - innerLimit, outerRadius - size / chordFactor);
 
@@ -1214,18 +1173,25 @@
 		return { fontSize: WHEEL_TEXT_MIN_FONT_PX, text: truncated + "…" };
 	}
 
+	// Draws a label in the current transform, which must already be
+	// rotated so +x points out along the middle of the slice.
+	function drawSliceLabel(ctx, text, sliceAngle) {
+		const fit = fitSliceText(ctx, text, ctx.canvas.width, sliceAngle);
+		if (!fit) return;
+		ctx.font = `normal ${fit.fontSize}px ${WHEEL_TEXT_FONT_FAMILY}`;
+		ctx.fillStyle = "black";
+		ctx.textAlign = "right";
+		ctx.textBaseline = "middle";
+		originalFillText.call(ctx, fit.text, WHEEL_TEXT_OUTER_BOUND_FRACTION * ctx.canvas.width, 0);
+	}
+
+	// Narrow slices (the ones Chaster leaves blank) are drawn from fill(),
+	// so the rotation has to be set up here from the recorded arc.
 	function drawNarrowSliceLabel(ctx, text, arc, sliceAngle) {
 		ctx.save();
-		const fit = fitNarrowSliceText(ctx, text, ctx.canvas.width, sliceAngle);
-		if (fit) {
-			ctx.translate(arc.x, arc.y);
-			ctx.rotate((arc.startAngle + arc.endAngle) / 2);
-			ctx.font = `normal ${fit.fontSize}px ${WHEEL_TEXT_FONT_FAMILY}`;
-			ctx.fillStyle = "black";
-			ctx.textAlign = "right";
-			ctx.textBaseline = "middle";
-			originalFillText.call(ctx, fit.text, WHEEL_TEXT_OUTER_BOUND_FRACTION * ctx.canvas.width, 0);
-		}
+		ctx.translate(arc.x, arc.y);
+		ctx.rotate((arc.startAngle + arc.endAngle) / 2);
+		drawSliceLabel(ctx, text, sliceAngle);
 		ctx.restore();
 	}
 
@@ -1237,14 +1203,10 @@
 			return originalFillText.call(this, text, x, y, maxWidth);
 		}
 
-		const anchorRadius = ((WHEEL_TEXT_INNER_BOUND_FRACTION + WHEEL_TEXT_OUTER_BOUND_FRACTION) / 2) * this.canvas.width;
-		const fit = fitSliceText(this, text, this.canvas.width, (spanDeg * Math.PI) / 180);
-
+		// Chaster's drawText has already translated to the hub and rotated
+		// to the middle of the slice.
 		this.save();
-		this.font = `normal ${fit.fontSize}px ${WHEEL_TEXT_FONT_FAMILY}`;
-		this.textAlign = "center";
-		this.textBaseline = "middle";
-		originalFillText.call(this, fit.text, anchorRadius, 0);
+		drawSliceLabel(this, text, (spanDeg * Math.PI) / 180);
 		this.restore();
 	};
 
