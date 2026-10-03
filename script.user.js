@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @match        https://chaster.app/*
 // @match        https://*.chaster.app/*
-// @version      3.3
+// @version      3.4
 // @description  Adds import/export buttons (weights included), per-slice color pickers, and drag-and-drop reordering to the Wheel of Fortune modal on chaster.app, makes the wheel canvas render those colors, correctly sizes/centers the slice text, makes the wheel responsive to its container at higher resolution for crisp HDPI rendering, and replaces Chaster's stand/pointer background image with a small CSS pointer overlapping the wheel.
 // @author       earlekastle
 // @icon         https://chaster.app/favicon.png
@@ -1058,29 +1058,55 @@
 		const weights = segments.map((s) => (config.weightsEnabled ? s?.weight ?? 1 : 1));
 		const total = weights.reduce((a, b) => a + b, 0) || 1;
 		const spans = weights.map((w) => (w / total) * 360);
-		return { segments, spans };
+
+		// The canvas component's own props hold the display-ordered
+		// segments with their finished label text (translated, durations
+		// formatted), which is what Chaster passes to fillText.
+		const canvasFiber = findFiberUp(canvas, (f) => Array.isArray(f.memoizedProps?.segments) && typeof f.memoizedProps.segments[0]?.text === "string", 6);
+		const drawn = canvasFiber?.memoizedProps.segments;
+		const labels = drawn && drawn.length === segments.length ? drawn.map((s) => s.text) : null;
+		const equalSlices = drawn ? drawn.every((s) => s.weight === drawn[0].weight) : weights.every((w) => w === weights[0]);
+		return { segments, spans, labels, equalSlices };
 	}
+
+	// Chaster's rule for which slices get a label (Sln / Tln in its bundle).
+	const CHASTER_MIN_LABELLED_SPAN_DEG = 12;
 
 	const originalClearRect = CanvasRenderingContext2D.prototype.clearRect;
 	CanvasRenderingContext2D.prototype.clearRect = function (...args) {
 		if (isWheelCanvas(this.canvas)) {
-			wheelFrameState.set(this, { fills: 0, info: readWheelInfo(this.canvas), colors: loadColors() });
+			wheelFrameState.set(this, { fills: 0, info: readWheelInfo(this.canvas), colors: loadColors(), arc: null });
 		}
 		return originalClearRect.apply(this, args);
 	};
 
+	// The wedge's position (center and angles) only shows up in arc(), and
+	// a narrow slice's label has to be drawn at that wedge's middle.
+	const originalArc = CanvasRenderingContext2D.prototype.arc;
+	CanvasRenderingContext2D.prototype.arc = function (x, y, radius, startAngle, endAngle, ...rest) {
+		const state = isWheelCanvas(this.canvas) ? wheelFrameState.get(this) : null;
+		if (state) state.arc = { x, y, startAngle, endAngle };
+		return originalArc.call(this, x, y, radius, startAngle, endAngle, ...rest);
+	};
+
 	const originalFill = CanvasRenderingContext2D.prototype.fill;
 	CanvasRenderingContext2D.prototype.fill = function (...args) {
-		if (isWheelCanvas(this.canvas)) {
-			const state = wheelFrameState.get(this);
-			if (state) {
-				const raw = state.info?.segments[state.fills];
-				state.fills++;
-				const override = raw && state.colors[rawSegmentIdentity(raw)];
-				if (override) this.fillStyle = override;
-			}
+		const state = isWheelCanvas(this.canvas) ? wheelFrameState.get(this) : null;
+		if (!state) return originalFill.apply(this, args);
+
+		const index = state.fills++;
+		const raw = state.info?.segments[index];
+		const override = raw && state.colors[rawSegmentIdentity(raw)];
+		if (override) this.fillStyle = override;
+		const result = originalFill.apply(this, args);
+
+		// Chaster skips the label on narrow slices, so draw it here instead.
+		const spanDeg = state.info?.spans[index];
+		const label = state.info?.labels?.[index];
+		if (label && spanDeg && state.arc && !state.info.equalSlices && spanDeg < CHASTER_MIN_LABELLED_SPAN_DEG) {
+			drawNarrowSliceLabel(this, label, state.arc, (spanDeg * Math.PI) / 180);
 		}
-		return originalFill.apply(this, args);
+		return result;
 	};
 
 	/*
@@ -1154,6 +1180,53 @@
 			truncated = truncated.slice(0, -1);
 		}
 		return { fontSize: WHEEL_TEXT_MIN_FONT_PX, text: truncated.length < text.length ? truncated + "…" : truncated };
+	}
+
+	/*
+	 * Narrow slices (the ones Chaster leaves blank) get their label pushed
+	 * out against the rim, where the wedge is widest, and right-aligned
+	 * there. The font is sized against the wedge's width at the label's
+	 * inner end, the narrowest point it covers, so a smaller font also
+	 * lets the label sit further out where there's more room.
+	 */
+	function fitNarrowSliceText(ctx, text, canvasWidth, sliceAngle) {
+		const outerRadius = WHEEL_TEXT_OUTER_BOUND_FRACTION * canvasWidth;
+		const innerLimit = WHEEL_TEXT_INNER_BOUND_FRACTION * canvasWidth;
+		const chordFactor = 2 * Math.sin(sliceAngle / 2) * WHEEL_TEXT_GAP_PADDING;
+		// Longest label (in px) that still has room for a font of `size`.
+		const maxWidthFor = (size) => Math.min(outerRadius - innerLimit, outerRadius - size / chordFactor);
+
+		for (let size = WHEEL_TEXT_MAX_FONT_PX; size >= WHEEL_TEXT_MIN_FONT_PX; size--) {
+			ctx.font = `normal ${size}px ${WHEEL_TEXT_FONT_FAMILY}`;
+			if (ctx.measureText(text).width <= maxWidthFor(size)) {
+				return { fontSize: size, text };
+			}
+		}
+
+		const budget = maxWidthFor(WHEEL_TEXT_MIN_FONT_PX);
+		ctx.font = `normal ${WHEEL_TEXT_MIN_FONT_PX}px ${WHEEL_TEXT_FONT_FAMILY}`;
+		let truncated = text;
+		while (truncated.length > 1 && ctx.measureText(truncated + "…").width > budget) {
+			truncated = truncated.slice(0, -1);
+		}
+		// Too thin for even a couple of characters at the smallest size.
+		if (truncated.length < 2 || ctx.measureText(truncated + "…").width > budget) return null;
+		return { fontSize: WHEEL_TEXT_MIN_FONT_PX, text: truncated + "…" };
+	}
+
+	function drawNarrowSliceLabel(ctx, text, arc, sliceAngle) {
+		ctx.save();
+		const fit = fitNarrowSliceText(ctx, text, ctx.canvas.width, sliceAngle);
+		if (fit) {
+			ctx.translate(arc.x, arc.y);
+			ctx.rotate((arc.startAngle + arc.endAngle) / 2);
+			ctx.font = `normal ${fit.fontSize}px ${WHEEL_TEXT_FONT_FAMILY}`;
+			ctx.fillStyle = "black";
+			ctx.textAlign = "right";
+			ctx.textBaseline = "middle";
+			originalFillText.call(ctx, fit.text, WHEEL_TEXT_OUTER_BOUND_FRACTION * ctx.canvas.width, 0);
+		}
+		ctx.restore();
 	}
 
 	const originalFillText = CanvasRenderingContext2D.prototype.fillText;
